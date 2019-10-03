@@ -1,3 +1,3 @@
 # miami-project-vdd-fastapi
 
-I will be using this repo to stand up an API for the Miami Project VDD 2019.
+I am reserving this repo to try and stand up an API for the Miami Project VDD 2019. May use a different repo in practice.
