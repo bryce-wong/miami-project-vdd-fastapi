@@ -1,0 +1,369 @@
+---
+title: "Bryce W Miami Project"
+author: "Bryce Wong"
+date: "October 6, 2019"
+output: github_document
+---
+
+## Load libraries
+
+```{r message = FALSE and warning = FALSE}
+library(data.table)
+library(dplyr)
+library(ggplot2)
+library(tidyverse)
+library(ggridges)
+library(patchwork)
+library(modelr)
+library(broom)
+library(mgcv)
+library(xgboost)
+library(vtreat)
+
+set.seed(1)
+```
+
+##Loading and tidying data
+
+Choosing variables that seem both easy to include in a model, and possibly predictive of days in review:
+
+* addition_sqft
+* building_final_last_insp_result: 154,116/154,117 NA (will exclude)
+* days_in_city_numeric
+* first_submission_date: not sure if I want to mess with date data/not sure if this is so important to include as a variable (will exclude for now)
+* is_private_provider
+* miami2zone: categorical, but maybe too many categories to sift through (will exclude)
+* new_addition_cost: 90,448/154,117 NA (will exclude)
+* property_type
+* remodeling_cost: 70,585/154,117 NA (will exclude)
+* rem_sqft
+* required_certificate: 79,079/154,117 NA (will exclude)
+* scopeof_work
+* total_cost
+* total_sqft
+
+Ilena is interested in:
+
+* total_sqft
+* scopeof_work (maybe combined with total_sqft)
+* property_type
+* total_cost
+
+Cuts:
+
+* Narrow to Miami?
+  * delivery address
+* Narrow to residential?
+
+I am also removing any entries where a variable is NA, and forcing text variables to be factors. 
+
+There appear to be 144,912 entries once the data has been cleaned. 
+
+```{r message = FALSE and warning = FALSE}
+#options(tibble.print_min = 3)
+
+miami_permit_data = read_csv(file = "./data/miami_permit_data.csv") 
+
+cleaned_miami = miami_permit_data %>% 
+  janitor::clean_names() %>%
+  select(permit_number, total_days_in_plan_review_numeric, is_private_provider, property_type, scopeof_work, total_sqft) %>% 
+  mutate(
+    scopeof_work = as_factor(scopeof_work),
+    property_type = as_factor(property_type),
+    is_private_provider = as_factor(is_private_provider)
+    ) %>% 
+  mutate(
+    scopeof_work = fct_infreq(scopeof_work),
+    property_type = fct_infreq(property_type),
+    is_private_provider = fct_infreq(is_private_provider)
+    ) %>%
+  drop_na()
+
+```
+
+##Exploring the data
+
+```{r message = FALSE and warning = FALSE}
+#density plots of the dependent variable against each categorical variable
+ggplot(cleaned_miami, aes(x = total_days_in_plan_review_numeric, fill = is_private_provider)) + 
+  geom_density(alpha = .4, adjust = .5, color = "blue") + scale_x_continuous(name = "Total Days in Review", limits = c(0, 1000))
+
+ggplot(cleaned_miami, aes(x = miami21zone)) + 
+  geom_density(alpha = .4, adjust = .5, color = "blue")
+
+#miami21zone may need to be one-hot encoded, or removed. check to see how many categories there are
+cleaned_miami %>% 
+  summarize(
+    n_zones = n_distinct(miami21zone)
+  )
+#150 categories - looking at the graph, there seems to be high cardinality. will exclude this variable.
+
+ggplot(cleaned_miami, aes(x = total_days_in_plan_review_numeric, fill = property_type)) + 
+  geom_density(alpha = .4, adjust = .5, color = "blue") + scale_x_continuous(name = "Total Days in Review", limits = c(0, 1000))
+
+ggplot(cleaned_miami, aes(x = total_days_in_plan_review_numeric, fill = scopeof_work)) + 
+  geom_density(alpha = .4, adjust = .5, color = "blue") + scale_x_continuous(name = "Total Days in Review", limits = c(0, 500))
+#check to see how many categories there are
+cleaned_miami %>% 
+  summarize(
+    n_zones = n_distinct(scopeof_work)
+  )
+# 19 categories - this seems more doable
+cleaned_miami %>%
+  count(scopeof_work) %>% 
+  arrange(desc(n))
+
+#check to see how many categories there are in the original dataset
+miami_permit_data %>% 
+  summarize(
+    n_zones = n_distinct(ScopeofWork)
+  )
+# 19 categories - this seems more doable
+miami_permit_data %>%
+  count(ScopeofWork) %>% 
+  arrange(desc(n))
+```
+
+```{r message = FALSE and warning = FALSE}
+#taking a look at the relationship between total days in plan review and the continuous variables
+cleaned_miami %>%
+  ggplot(aes(x = addition_sqft, y = total_days_in_plan_review_numeric)) + 
+  geom_point() +
+  geom_smooth(se = FALSE)
+
+cleaned_miami %>%
+  ggplot(aes(x = days_in_city_numeric, y = total_days_in_plan_review_numeric)) + 
+  geom_point() +
+  geom_smooth(se = FALSE)
+
+cleaned_miami %>%
+  ggplot(aes(x = rem_sqft, y = total_days_in_plan_review_numeric)) + 
+  geom_point() +
+  geom_smooth(se = FALSE)
+
+cleaned_miami %>%
+  ggplot(aes(x = total_cost, y = total_days_in_plan_review_numeric)) + 
+  geom_point() +
+  geom_smooth(se = FALSE)
+
+cleaned_miami %>%
+  ggplot(aes(x = total_sqft, y = total_days_in_plan_review_numeric)) + 
+  geom_point() +
+  geom_smooth(se = FALSE)
+```
+
+```{r message = FALSE and warning = FALSE}
+# taking a look at the relationship between 3 variables
+ggplot(cleaned_miami, aes(x = total_sqft, y = total_days_in_plan_review_numeric)) +
+  geom_point(aes(color = is_private_provider))
+
+ggplot(cleaned_miami, aes(x = total_cost, y = total_days_in_plan_review_numeric)) +
+  geom_point(aes(color = is_private_provider))
+
+ggplot(cleaned_miami, aes(x = days_in_city_numeric, y = total_days_in_plan_review_numeric)) +
+  geom_point(aes(color = is_private_provider))
+
+ggplot(cleaned_miami, aes(x = total_sqft, y = total_days_in_plan_review_numeric)) +
+  geom_point(aes(color = property_type))
+
+ggplot(cleaned_miami, aes(x = total_cost, y = total_days_in_plan_review_numeric)) +
+  geom_point(aes(color = property_type))
+
+ggplot(cleaned_miami, aes(x = days_in_city_numeric, y = total_days_in_plan_review_numeric)) +
+  geom_point(aes(color = property_type))
+
+ggplot(cleaned_miami, aes(x = total_sqft, y = total_days_in_plan_review_numeric)) +
+  geom_point(aes(color = scopeof_work))
+
+ggplot(cleaned_miami, aes(x = total_cost, y = total_days_in_plan_review_numeric)) +
+  geom_point(aes(color = scopeof_work))
+
+ggplot(cleaned_miami, aes(x = days_in_city_numeric, y = total_days_in_plan_review_numeric)) +
+  geom_point(aes(color = scopeof_work))
+```
+
+Results: 
+
+* No real linear relationships
+* Seems like the dichotomous variables are pretty evenly overlapping
+* scopeof_work seems promising 
+* Might try days_in_city_numeric combined with scopeof_work
+* Looks like we're going with property_type + scopeof_work + is_private_provider + total_sqft
+
+##Analysis
+
+###Fit a simple linear regression model
+
+```{r message = FALSE and warning = FALSE}
+# Had to drop COOKIE CUTTER level to include in multivariable linear model - probably fine, as there is only one observation that is in this level
+cleaned_scopeof_work = cleaned_miami %>% 
+  filter(scopeof_work != "COOKIE CUTTER") %>% 
+  mutate(
+    log_days_in_review = log(total_days_in_plan_review_numeric)
+  ) %>% 
+  drop_na() %>% 
+  filter(log_days_in_review != "-inf")
+
+#testing linear model without cross validation
+simple_linear = lm(log_days_in_review ~ property_type + scopeof_work + is_private_provider + total_sqft, data = cleaned_scopeof_work)
+
+#results
+simple_linear %>% 
+  broom::tidy() %>% 
+  select(term, estimate, p.value) %>% 
+  mutate(term = str_replace(term, "^scopeof_work", "Scope Of Work: ")) %>% 
+  knitr::kable(digits = 3)
+
+#cross validation to assess predictive accuracy
+cross_miami = crossv_kfold(cleaned_scopeof_work, 5)
+
+cross_miami = cross_miami %>% 
+  mutate(
+    lin_mod = map(train, ~lm(total_days_in_plan_review_numeric ~ days_in_city_numeric + scopeof_work, data = .x))
+  ) %>% 
+  mutate(
+    rmse_lin = map2_dbl(lin_mod, test, ~rmse(model = .x, data = .y))
+  )
+
+#diagnostics
+cross_miami %>% 
+  select(starts_with("rmse")) %>% 
+  gather(key = model, value = rmse) %>% 
+  mutate(model = str_replace(model, "rmse_", ""),
+         model = fct_inorder(model)) %>% 
+  ggplot(aes(x = model, y = rmse)) + geom_violin()
+
+```
+
+###Do feature importance stuff/hypothesis testing
+
+```{r message = FALSE and warning = FALSE}
+
+```
+
+###Fit a gradient boosted decision tree
+
+```{r message = FALSE and warning = FALSE}
+#one-hot encoding
+
+train = sample_n(cleaned_miami, 80)
+test = anti_join(cleaned_miami, train, by = "permit_number")
+
+# variable names
+features = setdiff(names(train), "total_days_in_plan_review_numeric")
+
+# Create the treatment plan from the training data
+tplan = designTreatmentsZ(train, features, verbose = FALSE)
+
+# Get the "clean" variable names from the scoreFrame
+new_vars = tplan %>%
+  magrittr::use_series(scoreFrame) %>%        
+  filter(code %in% c("clean", "lev")) %>% 
+  magrittr::use_series(varName)     
+
+# Prepare the training data
+features_train <- prepare(tplan, train, varRestriction = new_vars) %>% as.matrix()
+response_train <- train$total_days_in_plan_review_numeric
+
+# Prepare the test data
+features_test <- prepare(tplan, test, varRestriction = new_vars) %>% as.matrix()
+response_test <- test$total_days_in_plan_review_numeric
+
+# dimensions of one-hot encoded data
+dim(features_train)
+dim(features_test)
+
+# (this was just an attempt) crossValPlan = kWayStratifiedY(nrow(features_train), 10, features_train, features_test)
+
+# reproducibility
+set.seed(123)
+
+xgb.fit1 <- xgb.cv(
+  data = features_train,
+  label = response_train,
+  nrounds = 1000,
+  nfold = 5,
+  objective = "reg:linear",  # for regression models
+  verbose = 0               # silent,
+)
+```
+
+Looking at diagnostics: 
+
+```{r}
+# get number of trees that minimize error
+xgb.fit1$evaluation_log %>%
+  summarise(
+    ntrees.train = which(train_rmse_mean == min(train_rmse_mean))[1],
+    rmse.train   = min(train_rmse_mean),
+    ntrees.test  = which(test_rmse_mean == min(test_rmse_mean))[1],
+    rmse.test   = min(test_rmse_mean)
+  )
+#  ntrees.train rmse.train ntrees.test rmse.test
+#1          470  0.0011642           2  100.6328
+
+# plot error vs number trees
+ggplot(xgb.fit1$evaluation_log) +
+  geom_line(aes(iter, train_rmse_mean), color = "red") +
+  geom_line(aes(iter, test_rmse_mean), color = "blue")
+```
+
+Probably need to do something more with a hyperparameter tuning! Anyway, moving on:
+
+```{r}
+# parameter list
+params <- list(
+  eta = 0.01,
+  max_depth = 5,
+  min_child_weight = 5,
+  subsample = 0.65,
+  colsample_bytree = 1
+)
+
+# train final model
+xgb.fit.final <- xgboost(
+  params = params,
+  data = features_train,
+  label = response_train,
+  nrounds = 1576,
+  objective = "reg:linear",
+  verbose = 0
+)
+# create importance matrix
+importance_matrix <- xgb.importance(model = xgb.fit.final)
+
+# variable importance plot
+xgb.plot.importance(importance_matrix, top_n = 10, measure = "Gain")
+```
+
+###Shapley on gradient-boosted decision trees
+
+(need more time with this)
+
+```{r message = FALSE and warning = FALSE}
+
+xgb.plot.shap(data = features_train, # input data
+              model = xgb.fit.final, # xgboost model
+              features = names(features_train), # only top 10 var
+              n_col = 3, # layout option
+              plot_loess = T # add red line to plot
+              )
+
+contr <- predict(xgb.fit.final, features_test, predcontrib = TRUE)
+
+xgb.plot.shap(features_test, contr, model = xgb.fit.final, top_n = 12, n_col = 3)
+
+```
+
+###API
+
+```{r message = FALSE and warning = FALSE}
+
+```
+
+
+###Space to talk through dashboard or Shiny stuff 
+
+* Looks like we can make a flexdashboard that renders to shiny.
+* Will need to make a new .Rmd file
+* We have to port code into it
